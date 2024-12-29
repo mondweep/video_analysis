@@ -69,4 +69,5 @@ Thumbs.db
 # Add to .gitignore
 venv/
 __pycache__/
-*.pyc 
+*.pyc !src/output/20241228_180505/processed_video.mp4
+!src/output/stories/video_story_20241228_180544.txt

@@ -6,8 +6,10 @@ from collections import Counter
 from datetime import datetime
 from transformers import Blip2Processor, Blip2ForConditionalGeneration
 import torch
+import openai
 
 load_dotenv()
+openai.api_key = os.getenv('OPENAI_API_KEY')
 
 def setup_gemini():
     """Initialize Gemini API"""
@@ -34,107 +36,173 @@ def analyze_detections(all_detections):
     object_counts = Counter(objects_detected)
     return dict(object_counts)
 
-def generate_video_story(detection_counts, scene_info, duration, video_url, start_time):
-    """Generate a story and poem based on video content"""
+def generate_video_story(objects, scenes, actions, temporal_info, duration, video_url, start_time):
+    """Generate a story from video analysis results"""
     try:
+        # Process detection data
+        object_counts = dict(Counter(objects))
+        
+        # Get most common elements
+        top_objects = sorted(object_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+        top_scenes = sorted(scenes.items(), key=lambda x: x[1], reverse=True)[:5]
+        
+        # Setup Gemini
         model = setup_gemini()
         
-        # Ensure start_time is properly formatted
-        if isinstance(start_time, (int, float)):
-            start_minutes = int(start_time)
-            start_seconds = 0
-        else:
-            start_minutes, start_seconds = map(int, start_time)
+        # Create prompts
+        story_prompt = f"""
+        Create an engaging 200-word story based on these elements from a video:
+        - Main objects seen: {', '.join(f'{obj} ({count} times)' for obj, count in top_objects)}
+        - Scene settings: {', '.join(f'{scene}' for scene, _ in top_scenes)}
         
-        # Create scene description
-        scene_description = []
-        for obj, count in detection_counts.items():
-            scene_description.append(f"- {obj}: {count} occurrences")
-        
-        scene_description.append("\nScene classification:")
-        for scene, score in scene_info.items():
-            if score > 0.1:
-                scene_description.append(f"- {scene}: {score:.2f} confidence")
-        
-        scene_text = "\n".join(scene_description)
-        prompt = f"""
-        Create a family-friendly story and poem about this scene:
-        
-        Video duration: {duration} seconds
-        Time marker: {start_minutes}:{start_seconds:02d}
-        
-        Observed elements:
-        {scene_text}
-        
-        Please write:
-        1. A brief, G-rated story about what's happening (100 words)
-        2. A simple, child-friendly poem (4 lines)
-        
-        Keep the tone light and appropriate for all ages.
+        Requirements:
+        1. Story should be exactly 200 words
+        2. Incorporate the most frequently seen objects naturally
+        3. Use the scene settings as the environment
+        4. Make it creative and engaging
         """
         
-        # Updated safety settings according to the documentation
-        safety_settings = [
-            {
-                "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-            },
-            {
-                "category": "HARM_CATEGORY_HATE_SPEECH",
-                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-            },
-            {
-                "category": "HARM_CATEGORY_HARASSMENT",
-                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-            },
-            {
-                "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-            }
-        ]
+        poem_prompt = f"""
+        Create a short, vivid poem about this scene:
+        - Key elements: {', '.join(f'{obj}' for obj, _ in top_objects[:5])}
+        - Setting: {', '.join(f'{scene}' for scene, _ in top_scenes[:2])}
         
-        print(f"\nScene Text: {scene_text}")
-        response = model.generate_content(
-            prompt,
-            safety_settings=safety_settings,
-            generation_config={
-                "temperature": 0.7,
-                "top_p": 0.8,
-                "top_k": 40
-            }
-        )
+        Requirements:
+        1. Keep it under 8 lines
+        2. Make it evocative and atmospheric
+        3. Include at least 3 of the key elements
+        4. Reference the setting
+        """
         
-        # Check if response is blocked
-        if not response.candidates:
-            raise ValueError("Response was blocked by safety filters. Trying with more conservative prompt...")
+        # Generate content using Gemini
+        print("\nGenerating story...")
+        story_response = model.generate_content(story_prompt)
         
-        # Save and display the story
-        output_dir = Path("output") / "stories"
+        print("Generating poem...")
+        poem_response = model.generate_content(poem_prompt)
+        
+        # Save to file
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_dir = Path("output/stories")
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_file = output_dir / f"video_story_{timestamp}.txt"
+        output_path = output_dir / f"video_story_{timestamp}.txt"
         
-        with open(output_file, 'w') as f:
-            if hasattr(response, 'text'):
-                f.write(response.text)
-            else:
-                f.write(str(response.candidates[0].content.parts[0].text))
+        with open(output_path, 'w', encoding='utf-8') as f:
+            # Write header
+            f.write(f"Video Analysis Results\n")
+            f.write(f"{'='*50}\n\n")
+            f.write(f"Source: {video_url}\n")
+            f.write(f"Time: {start_time[0]}:{start_time[1]}, Duration: {duration}s\n\n")
+            
+            # Write detected elements
+            f.write("Scene Elements Detected:\n")
+            f.write(f"{'='*50}\n\n")
+            f.write("Objects:\n")
+            f.write(f"{'-'*20}\n")
+            f.write('\n'.join(f"- {obj} ({count} times)" for obj, count in top_objects))
+            f.write("\n\nScenes:\n")
+            f.write(f"{'-'*20}\n")
+            f.write('\n'.join(f"- {scene}" for scene, _ in top_scenes))
+            
+            # Write generated story
+            f.write("\n\nGenerated Story:\n")
+            f.write(f"{'='*50}\n")
+            f.write(story_response.text)
+            
+            # Write generated poem
+            f.write("\n\nPoetic Interpretation:\n")
+            f.write(f"{'='*50}\n")
+            f.write(poem_response.text)
         
-        print(f"\nStory and poem generated and saved to: {output_file}")
-        print("\nGenerated content:")
-        print("-" * 50)
-        if hasattr(response, 'text'):
-            print(response.text)
-        else:
-            print(response.candidates[0].content.parts[0].text)
-        print("-" * 50)
+        print(f"\nGenerated content saved to: {output_path}")
         
     except Exception as e:
         print(f"Error generating story: {str(e)}")
-        print(f"Error details: {e.__class__.__name__}")
         import traceback
         print(f"Error traceback: {traceback.format_exc()}")
+
+def get_system_prompt(style):
+    """Return appropriate system prompt based on style"""
+    prompts = {
+        'story': "You are a creative writer who turns video scenes into engaging narratives.",
+        'poem': "You are a poet who creates vivid imagery from visual scenes.",
+        'analysis': "You are an analytical observer who provides detailed scene descriptions."
+    }
+    return prompts.get(style, prompts['story'])
+
+def create_story_prompt(elements):
+    """Create detailed story prompt from scene elements"""
+    return f"""
+Create an engaging story based on this video scene:
+- Main objects observed: {', '.join(elements['objects'])}
+- Scene setting: {', '.join(elements['scenes'])}
+- Actions occurring: {', '.join(elements['actions'])}
+- Environmental elements: {', '.join(elements['environment'])}
+- Weather/Atmosphere: {', '.join(elements['weather'])}
+- Sequence of events: {', '.join(elements['sequence'])}
+
+Make the story vivid and engaging, incorporating the natural elements, actions, and atmosphere.
+"""
+
+def create_poem_prompt(elements):
+    """Create poetry prompt from scene elements"""
+    return f"""
+Create a descriptive poem capturing this scene:
+- Visual elements: {', '.join(elements['objects'])}
+- Setting: {', '.join(elements['scenes'])}
+- Movement: {', '.join(elements['actions'])}
+- Nature: {', '.join(elements['environment'])}
+- Atmosphere: {', '.join(elements['weather'])}
+
+Focus on creating vivid imagery and emotional resonance.
+"""
+
+def create_analysis_prompt(elements):
+    """Create analytical description prompt"""
+    return f"""
+Provide a detailed analysis of this video scene:
+- Primary elements: {', '.join(elements['objects'])}
+- Setting classification: {', '.join(elements['scenes'])}
+- Observed actions: {', '.join(elements['actions'])}
+- Environmental context: {', '.join(elements['environment'])}
+- Atmospheric conditions: {', '.join(elements['weather'])}
+- Event progression: {', '.join(elements['sequence'])}
+
+Focus on the relationships between elements and their significance.
+"""
+
+def save_generated_content(stories, elements, video_url, start_time, duration):
+    """Save all generated content to file"""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = Path("output/stories")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    output_path = output_dir / f"video_story_{timestamp}.txt"
+    
+    with open(output_path, 'w') as f:
+        f.write(f"Video Analysis Results\n")
+        f.write(f"{'='*50}\n\n")
+        f.write(f"Source: {video_url}\n")
+        f.write(f"Time: {start_time[0]}:{start_time[1]}, Duration: {duration}s\n\n")
+        
+        # Write scene elements
+        f.write("Scene Elements Detected:\n")
+        f.write(f"{'='*50}\n")
+        for category, items in elements.items():
+            f.write(f"\n{category.title()}:\n")
+            f.write(f"{'-'*20}\n")
+            f.write('\n'.join(f"- {item}" for item in items))
+            f.write('\n')
+        
+        # Write generated content
+        for style, content in stories.items():
+            f.write(f"\n\n{style.title()}:\n")
+            f.write(f"{'='*50}\n")
+            f.write(content)
+            f.write('\n')
+        
+    print(f"\nGenerated content saved to: {output_path}")
 
 def setup_scene_analyzer():
     processor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b")
